@@ -121,6 +121,9 @@ const (
 
 	VpcNameLabel                       = "ovn.kubernetes.io/vpc"
 	SubnetNameLabel                    = "ovn.kubernetes.io/subnet"
+	// DRAManagedByLabel marks an IP object created by a DRA driver; the
+	// reserved-IP reconciler creates an LSP for these on overlay subnets (POC).
+	DRAManagedByLabel = "dra.kubeovn.io/managed-by"
 	ICGatewayLabel                     = "ovn.kubernetes.io/ic-gw"
 	ExGatewayLabel                     = "ovn.kubernetes.io/external-gw"
 	NodeExtGwLabel                     = "ovn.kubernetes.io/node-ext-gw"

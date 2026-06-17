@@ -448,6 +448,19 @@ func (c *Controller) markAndCleanLSP() error {
 				continue
 			}
 			ipMap.Add(ovs.PodNameToPortName(podName, pod.Namespace, providerName))
+			// getNameByPod substitutes the VM's stable name for podName above
+			// (EnableKeepVMIP, for migration continuity), but not every LSP
+			// for a VM-owned pod is named that way: kube-ovn-dra-driver names
+			// DRA-managed ports after the pod itself, not the VM. Protecting
+			// only the VM-substituted name left such ports recognized as
+			// "allocated" (via the annotation loop above) yet still computed
+			// to the wrong expected name, so they were reaped a couple of gc
+			// cycles later despite the pod still being alive (confirmed
+			// live). Add the raw pod-name variant too — a no-op when
+			// podName == pod.Name already.
+			if podName != pod.Name {
+				ipMap.Add(ovs.PodNameToPortName(pod.Name, pod.Namespace, providerName))
+			}
 		}
 	}
 	for _, node := range nodes {

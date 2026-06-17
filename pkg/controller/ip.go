@@ -206,6 +206,69 @@ func (c *Controller) handleAddReservedIP(key string) error {
 		return err
 	}
 
+	// POC(dra): for IP objects created by a DRA driver on an OVN OVERLAY subnet,
+	// also create the Logical Switch Port so OVN binds the chassis port when the
+	// driver attaches the veth to br-int (external_ids:iface-id=<ip.Name>).
+	// Normally the LSP is created in the pod-handling path, but a DRA driver has
+	// no such path. Gated on the DRA label + overlay (no VLAN) so it does not
+	// change behavior for other reserved IPs or for VLAN underlay (which is
+	// plumbed on the provider bridge and needs no LSP).
+	if ip.Labels[util.DRAManagedByLabel] != "" && subnet.Spec.Vlan == "" {
+		// Reuse the subnet's already-reconciled DHCP_Options (see
+		// subnetDHCPOptionsUUIDs / the normal pod-handling path in pod.go) —
+		// without this, the LSP is created with dhcpv4_options unset even
+		// when the subnet has EnableDHCP: true, so OVN's DHCP responder never
+		// answers this port's requests. There are no per-port DHCP
+		// annotations for a DRA-created IP, so just the subnet-level options
+		// apply here, unlike the pod path's ReconcilePortDHCPOptions.
+		if err := c.OVNNbClient.CreateLogicalSwitchPort(subnet.Name, ip.Name, ipStr, mac,
+			ip.Spec.PodName, ip.Spec.Namespace, false, "", "", subnet.Spec.EnableDHCP, subnetDHCPOptionsUUIDs(subnet), subnet.Spec.Vpc); err != nil {
+			err = fmt.Errorf("failed to create LSP %s for DRA reserved ip: %w", ip.Name, err)
+			klog.Error(err)
+			return err
+		}
+		klog.Infof("POC(dra): created LSP %s on switch %s for reserved ip", ip.Name, subnet.Name)
+
+		// Match the same per-provider annotations reconcileAllocateSubnets
+		// (pod.go) sets on a normally CNI-attached pod. Without these,
+		// nothing marks this pod as having a live OVN attachment on this
+		// provider — notably markAndCleanLSP's GC safety check (gc.go) reads
+		// exactly this annotation to decide an LSP still belongs to a running
+		// workload — so the LSP we just created got silently deleted a
+		// couple of gc cycles later even though the VM's domain was still
+		// actively using the interface (confirmed live).
+		// Deliberately NOT setting <provider>.kubernetes.io/default_route
+		// here: whether a DRA-attached network should carry the default
+		// route is VMI-topology knowledge kube-ovn-controller has no
+		// visibility into (it only sees a generic, driver-agnostic DRA IP
+		// object) and must not guess at. PatchAnnotations below is an
+		// unconditional merge patch, so including a hardcoded value here
+		// would silently stomp whatever the VMI author explicitly set on
+		// the VMI (KubeVirt propagates VMI metadata.annotations onto the
+		// generated virt-launcher pod — the same mechanism already used for
+		// kubevirt.io/allow-pod-bridge-network-live-migration in the demo
+		// manifests). A VMI author who cares sets the annotation directly;
+		// this patch just leaves it alone either way.
+		provider := subnet.Spec.Provider
+		patch := util.KVPatch{
+			fmt.Sprintf(util.IPAddressAnnotationTemplate, provider):     ipStr,
+			fmt.Sprintf(util.CidrAnnotationTemplate, provider):          subnet.Spec.CIDRBlock,
+			fmt.Sprintf(util.GatewayAnnotationTemplate, provider):       subnet.Spec.Gateway,
+			fmt.Sprintf(util.LogicalSwitchAnnotationTemplate, provider): subnet.Name,
+			fmt.Sprintf(util.AllocatedAnnotationTemplate, provider):     "true",
+		}
+		if mac == "" {
+			patch[fmt.Sprintf(util.MacAddressAnnotationTemplate, provider)] = nil
+		} else {
+			patch[fmt.Sprintf(util.MacAddressAnnotationTemplate, provider)] = mac
+		}
+		if err := util.PatchAnnotations(c.config.KubeClient.CoreV1().Pods(ip.Spec.Namespace), ip.Spec.PodName, patch); err != nil {
+			err = fmt.Errorf("failed to patch pod %s/%s annotations for DRA reserved ip: %w", ip.Spec.Namespace, ip.Spec.PodName, err)
+			klog.Error(err)
+			return err
+		}
+	}
+
 	ip = ip.DeepCopy()
 	if ip.Labels == nil {
 		ip.Labels = map[string]string{}
