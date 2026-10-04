@@ -1280,6 +1280,7 @@ false
   "OVSDB_CON_TIMEOUT": 3,
   "OVSDB_INACTIVITY_TIMEOUT": 10,
   "SET_VXLAN_TX_OFF": false,
+  "enableDraNic": false,
   "enableExternalVpcs": false,
   "enableHardwareOffload": false,
   "enableHostTunnelSrc": false,
@@ -1298,6 +1299,15 @@ false
 </pre>
 </td>
 			<td>Features of Kube-OVN we wish to enable/disable.</td>
+		</tr>
+		<tr>
+			<td>features.enableDraNic</td>
+			<td>bool</td>
+			<td><pre lang="json">
+false
+</pre>
+</td>
+			<td>Experimental: treat devices allocated by the kube-ovn DRA NIC driver (nic.kubeovn.io) as pod network attachments</td>
 		</tr>
 		<tr>
 			<td>features.enableExternalVpcs</td>
