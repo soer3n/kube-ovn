@@ -1,0 +1,204 @@
+package dra
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"slices"
+	"testing"
+	"time"
+
+	corev1 "k8s.io/api/core/v1"
+	resourcev1 "k8s.io/api/resource/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/klog/v2"
+	"k8s.io/kubernetes/test/e2e"
+	k8sframework "k8s.io/kubernetes/test/e2e/framework"
+	"k8s.io/kubernetes/test/e2e/framework/config"
+	e2enode "k8s.io/kubernetes/test/e2e/framework/node"
+
+	"github.com/onsi/ginkgo/v2"
+	"github.com/onsi/gomega"
+
+	"github.com/kubeovn/kube-ovn/pkg/ovs"
+	"github.com/kubeovn/kube-ovn/pkg/util"
+	"github.com/kubeovn/kube-ovn/test/e2e/framework"
+)
+
+// driverName is the default --dra-nic-driver-name of kube-ovn-controller.
+const driverName = "nic.kubeovn.io"
+
+func init() {
+	klog.SetOutput(ginkgo.GinkgoWriter)
+
+	config.CopyFlags(config.Flags, flag.CommandLine)
+	k8sframework.RegisterCommonFlags(flag.CommandLine)
+	k8sframework.RegisterClusterFlags(flag.CommandLine)
+}
+
+func TestE2E(t *testing.T) {
+	k8sframework.AfterReadingAllFlags(&k8sframework.TestContext)
+	e2e.RunE2ETests(t)
+}
+
+// draNicEnabled reports whether kube-ovn-controller runs with --enable-dra-nic=true.
+func draNicEnabled(f *framework.Framework) bool {
+	ginkgo.GinkgoHelper()
+
+	deploy, err := f.ClientSet.AppsV1().Deployments(framework.KubeOvnNamespace).Get(context.Background(), "kube-ovn-controller", metav1.GetOptions{})
+	framework.ExpectNoError(err)
+	for _, container := range deploy.Spec.Template.Spec.Containers {
+		if slices.Contains(container.Args, "--enable-dra-nic=true") {
+			return true
+		}
+	}
+	return false
+}
+
+// These tests cover only the kube-ovn-controller side of DRA nics, not the data plane. They publish
+// a static ResourceSlice for the kube-ovn DRA NIC driver and let the scheduler allocate a claim from
+// it. No kubelet plugin serves the driver, so the claim is never prepared and the pod never starts:
+// no nic is plugged into its netns. Everything kube-ovn-controller does for a DRA nic happens before
+// that, so the tests check its annotations, ip CR and release with a real scheduler, API and RBAC.
+var _ = framework.SerialDescribe("[group:dra]", func() {
+	f := framework.NewDefaultFramework("dra")
+
+	var podClient *framework.PodClient
+	var subnetClient *framework.SubnetClient
+	var ipClient *framework.IPClient
+	var namespaceName, suffix, subnetName, provider, deviceClassName, sliceName, claimName, podName string
+	var skipped bool
+	ginkgo.BeforeEach(func() {
+		podClient = f.PodClient()
+		subnetClient = f.SubnetClient()
+		ipClient = f.IPClient()
+		namespaceName = f.Namespace.Name
+		suffix = framework.RandomSuffix()
+		subnetName = "dra-subnet-" + suffix
+		provider = fmt.Sprintf("%s.%s.%s", subnetName, namespaceName, util.OvnProvider)
+		deviceClassName = "dra-nic-" + suffix
+		sliceName = "dra-nic-" + suffix
+		claimName = "claim-" + suffix
+		podName = "pod-" + suffix
+
+		// Cleanup only applies once the checks below passed and the spec created resources.
+		skipped = true
+		f.SkipVersionPriorTo(1, 17, "DRA NIC support was introduced in v1.17")
+		if !draNicEnabled(f) {
+			ginkgo.Skip("kube-ovn-controller does not run with --enable-dra-nic=true")
+		}
+		skipped = false
+	})
+	ginkgo.AfterEach(func() {
+		if skipped {
+			return
+		}
+		ctx := context.Background()
+		resource := f.ClientSet.ResourceV1()
+		ginkgo.By("Deleting pod " + podName)
+		err := f.ClientSet.CoreV1().Pods(namespaceName).Delete(ctx, podName, metav1.DeleteOptions{GracePeriodSeconds: new(int64(0))})
+		if err != nil && !apierrors.IsNotFound(err) {
+			framework.ExpectNoError(err)
+		}
+		podClient.WaitForNotFound(podName)
+		ginkgo.By("Deleting resource claim, slice and device class")
+		for _, err := range []error{
+			resource.ResourceClaims(namespaceName).Delete(ctx, claimName, metav1.DeleteOptions{}),
+			resource.ResourceSlices().Delete(ctx, sliceName, metav1.DeleteOptions{}),
+			resource.DeviceClasses().Delete(ctx, deviceClassName, metav1.DeleteOptions{}),
+		} {
+			if err != nil && !apierrors.IsNotFound(err) {
+				framework.ExpectNoError(err)
+			}
+		}
+		ginkgo.By("Deleting subnet " + subnetName)
+		subnetClient.DeleteSync(subnetName)
+	})
+
+	ginkgo.It("should allocate a DRA nic from the claimed subnet and release it with the pod", func() {
+		ctx := context.Background()
+		resource := f.ClientSet.ResourceV1()
+
+		ginkgo.By("Creating subnet " + subnetName + " with provider " + provider)
+		cidr := framework.RandomCIDR(f.ClusterIPFamily)
+		subnet := subnetClient.CreateSync(framework.MakeSubnet(subnetName, "", cidr, "", "", provider, nil, nil, nil))
+
+		nodes, err := e2enode.GetReadySchedulableNodes(ctx, f.ClientSet)
+		framework.ExpectNoError(err)
+		nodeName := nodes.Items[0].Name
+
+		ginkgo.By("Publishing device subnet-" + subnetName + " on node " + nodeName)
+		_, err = resource.DeviceClasses().Create(ctx, &resourcev1.DeviceClass{
+			Name: deviceClassName,
+			Spec: resourcev1.DeviceClassSpec{Selectors: []resourcev1.DeviceSelector{{
+				CEL: &resourcev1.CELDeviceSelector{Expression: fmt.Sprintf("device.driver == %q", driverName)},
+			}}},
+		}, metav1.CreateOptions{})
+		framework.ExpectNoError(err)
+		_, err = resource.ResourceSlices().Create(ctx, &resourcev1.ResourceSlice{
+			Name: sliceName,
+			Spec: resourcev1.ResourceSliceSpec{
+				Driver:   driverName,
+				NodeName: new(nodeName),
+				Pool:     resourcev1.ResourcePool{Name: sliceName, ResourceSliceCount: 1},
+				Devices: []resourcev1.Device{{
+					Name: "subnet-" + subnetName,
+					Attributes: map[resourcev1.QualifiedName]resourcev1.DeviceAttribute{
+						driverName + "/subnetName": {StringValue: new(subnetName)},
+					},
+				}},
+			},
+		}, metav1.CreateOptions{})
+		framework.ExpectNoError(err)
+
+		ginkgo.By("Creating resource claim " + claimName + " and pod " + podName)
+		_, err = resource.ResourceClaims(namespaceName).Create(ctx, &resourcev1.ResourceClaim{
+			Name: claimName,
+			Spec: resourcev1.ResourceClaimSpec{Devices: resourcev1.DeviceClaim{Requests: []resourcev1.DeviceRequest{{
+				Name: "nic0",
+				Exactly: &resourcev1.ExactDeviceRequest{
+					DeviceClassName: deviceClassName,
+					Selectors: []resourcev1.DeviceSelector{{CEL: &resourcev1.CELDeviceSelector{
+						Expression: fmt.Sprintf("device.attributes[%q].subnetName == %q", driverName, subnetName),
+					}}},
+				},
+			}}}},
+		}, metav1.CreateOptions{})
+		framework.ExpectNoError(err)
+
+		pod := framework.MakePod(namespaceName, podName, nil, nil, "", nil, nil)
+		pod.Spec.ResourceClaims = []corev1.PodResourceClaim{{Name: "nic", ResourceClaimName: new(claimName)}}
+		pod.Spec.Containers[0].Resources.Claims = []corev1.ResourceClaim{{Name: "nic"}}
+		_ = podClient.Create(pod)
+
+		ginkgo.By("Waiting for kube-ovn-controller to allocate the DRA nic")
+		allocatedKey := fmt.Sprintf(util.AllocatedAnnotationTemplate, provider)
+		gomega.Eventually(func(g gomega.Gomega) {
+			pod, err := f.ClientSet.CoreV1().Pods(namespaceName).Get(ctx, podName, metav1.GetOptions{})
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+			g.Expect(pod.Annotations).To(gomega.HaveKeyWithValue(allocatedKey, "true"))
+		}).WithTimeout(2 * time.Minute).WithPolling(2 * time.Second).Should(gomega.Succeed())
+
+		pod = podClient.GetPod(podName)
+		framework.ExpectHaveKeyWithValue(pod.Annotations, fmt.Sprintf(util.LogicalSwitchAnnotationTemplate, provider), subnetName)
+		framework.ExpectHaveKeyWithValue(pod.Annotations, fmt.Sprintf(util.CidrAnnotationTemplate, provider), subnet.Spec.CIDRBlock)
+		ipStr := pod.Annotations[fmt.Sprintf(util.IPAddressAnnotationTemplate, provider)]
+		framework.ExpectTrue(util.CIDRContainIP(subnet.Spec.CIDRBlock, ipStr), "%s should be in %s", ipStr, subnet.Spec.CIDRBlock)
+
+		ginkgo.By("Checking the ip CR of the DRA nic")
+		ipName := ovs.PodNameToPortName(podName, namespaceName, provider)
+		ip := ipClient.Get(ipName)
+		framework.ExpectEqual(ip.Spec.Subnet, subnetName)
+		framework.ExpectEqual(ip.Spec.NodeName, nodeName)
+
+		ginkgo.By("Deleting pod " + podName + " and checking the DRA nic is released")
+		framework.ExpectNoError(f.ClientSet.CoreV1().Pods(namespaceName).Delete(ctx, podName, metav1.DeleteOptions{GracePeriodSeconds: new(int64(0))}))
+		podClient.WaitForNotFound(podName)
+		framework.ExpectNoError(ipClient.WaitToDisappear(ipName, 2*time.Second, 2*time.Minute))
+		gomega.Eventually(func(g gomega.Gomega) {
+			subnet := subnetClient.Get(subnetName)
+			g.Expect(subnet.Status.V4UsingIPs.Add(subnet.Status.V6UsingIPs).EqualInt64(0)).To(gomega.BeTrue())
+		}).WithTimeout(time.Minute).WithPolling(2 * time.Second).Should(gomega.Succeed())
+	})
+})
