@@ -32,6 +32,8 @@ The driver is expected to
 3. plug the interface into the pod network namespace and attach its host end to `br-int` with `external_ids:iface-id=<logical switch port name>`
 4. not release anything on unprepare: kube-ovn-controller releases the address when the pod is deleted, or keeps it for a keep-vm-ip VM, as for Multus attachments
 
+Ports the driver leaves behind are cleaned up by kube-ovn-cni: its periodic garbage collection deletes OVS interfaces that carry the `external_ids` `pod_name` and `pod_namespace` and whose link is not up, once the named pod no longer exists on the node (kube-ovn-cni itself puts the VM's name there for the pod of a KubeVirt VM, and the collection resolves such a name through the labels of the live virt-launcher pod; the reference driver puts the pod's own name there, which the collection handles as well). A driver that sets these keys on the ports it adds gets leftovers removed that way; a driver that does not has to remove them itself. The reference driver sets `iface-id`, `pod_name`, `pod_namespace`, `pod_netns` and `ip`. This is a contract with kube-ovn-cni, so a change to those keys or to that garbage collection affects drivers.
+
 ## Lifecycle
 
 - Pod deletion releases the NIC's port, ip CR and address, also when the claim's reservation is already gone.
