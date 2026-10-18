@@ -27,7 +27,22 @@ import (
 )
 
 // driverName is the default --dra-nic-driver-name of kube-ovn-controller.
-const driverName = "nic.kubeovn.io"
+// Values the specs share.
+const (
+	driverName        = "nic.kubeovn.io"
+	controllerName    = "kube-ovn-controller"
+	enableDRANicFlag  = "--enable-dra-nic=true"
+	frameworkBaseName = "dra"
+	subnetPrefix      = "dra-subnet-"
+	draNicPrefix      = "dra-nic-"
+	claimPrefix       = "claim-"
+	podPrefix         = "pod-"
+	devicePrefix      = "subnet-"
+	attrSubnetName    = "subnetName"
+	requestName       = "nic0"
+	podClaimName      = "nic"
+	allocatedValue    = "true"
+)
 
 func init() {
 	klog.SetOutput(ginkgo.GinkgoWriter)
@@ -46,10 +61,10 @@ func TestE2E(t *testing.T) {
 func draNicEnabled(f *framework.Framework) bool {
 	ginkgo.GinkgoHelper()
 
-	deploy, err := f.ClientSet.AppsV1().Deployments(framework.KubeOvnNamespace).Get(context.Background(), "kube-ovn-controller", metav1.GetOptions{})
+	deploy, err := f.ClientSet.AppsV1().Deployments(framework.KubeOvnNamespace).Get(context.Background(), controllerName, metav1.GetOptions{})
 	framework.ExpectNoError(err)
 	for _, container := range deploy.Spec.Template.Spec.Containers {
-		if slices.Contains(container.Args, "--enable-dra-nic=true") {
+		if slices.Contains(container.Args, enableDRANicFlag) {
 			return true
 		}
 	}
@@ -62,7 +77,7 @@ func draNicEnabled(f *framework.Framework) bool {
 // no nic is plugged into its netns. Everything kube-ovn-controller does for a DRA nic happens before
 // that, so the tests check its annotations, ip CR and release with a real scheduler, API and RBAC.
 var _ = framework.SerialDescribe("[group:dra]", func() {
-	f := framework.NewDefaultFramework("dra")
+	f := framework.NewDefaultFramework(frameworkBaseName)
 
 	var podClient *framework.PodClient
 	var subnetClient *framework.SubnetClient
@@ -75,12 +90,12 @@ var _ = framework.SerialDescribe("[group:dra]", func() {
 		ipClient = f.IPClient()
 		namespaceName = f.Namespace.Name
 		suffix = framework.RandomSuffix()
-		subnetName = "dra-subnet-" + suffix
+		subnetName = subnetPrefix + suffix
 		provider = fmt.Sprintf("%s.%s.%s", subnetName, namespaceName, util.OvnProvider)
-		deviceClassName = "dra-nic-" + suffix
-		sliceName = "dra-nic-" + suffix
-		claimName = "claim-" + suffix
-		podName = "pod-" + suffix
+		deviceClassName = draNicPrefix + suffix
+		sliceName = draNicPrefix + suffix
+		claimName = claimPrefix + suffix
+		podName = podPrefix + suffix
 
 		// Cleanup only applies once the checks below passed and the spec created resources.
 		skipped = true
@@ -143,9 +158,9 @@ var _ = framework.SerialDescribe("[group:dra]", func() {
 				NodeName: new(nodeName),
 				Pool:     resourcev1.ResourcePool{Name: sliceName, ResourceSliceCount: 1},
 				Devices: []resourcev1.Device{{
-					Name: "subnet-" + subnetName,
+					Name: devicePrefix + subnetName,
 					Attributes: map[resourcev1.QualifiedName]resourcev1.DeviceAttribute{
-						driverName + "/subnetName": {StringValue: new(subnetName)},
+						driverName + "/" + attrSubnetName: {StringValue: new(subnetName)},
 					},
 				}},
 			},
@@ -156,7 +171,7 @@ var _ = framework.SerialDescribe("[group:dra]", func() {
 		_, err = resource.ResourceClaims(namespaceName).Create(ctx, &resourcev1.ResourceClaim{
 			Name: claimName,
 			Spec: resourcev1.ResourceClaimSpec{Devices: resourcev1.DeviceClaim{Requests: []resourcev1.DeviceRequest{{
-				Name: "nic0",
+				Name: requestName,
 				Exactly: &resourcev1.ExactDeviceRequest{
 					DeviceClassName: deviceClassName,
 					Selectors: []resourcev1.DeviceSelector{{CEL: &resourcev1.CELDeviceSelector{
@@ -168,8 +183,8 @@ var _ = framework.SerialDescribe("[group:dra]", func() {
 		framework.ExpectNoError(err)
 
 		pod := framework.MakePod(namespaceName, podName, nil, nil, "", nil, nil)
-		pod.Spec.ResourceClaims = []corev1.PodResourceClaim{{Name: "nic", ResourceClaimName: new(claimName)}}
-		pod.Spec.Containers[0].Resources.Claims = []corev1.ResourceClaim{{Name: "nic"}}
+		pod.Spec.ResourceClaims = []corev1.PodResourceClaim{{Name: podClaimName, ResourceClaimName: new(claimName)}}
+		pod.Spec.Containers[0].Resources.Claims = []corev1.ResourceClaim{{Name: podClaimName}}
 		_ = podClient.Create(pod)
 
 		ginkgo.By("Waiting for kube-ovn-controller to allocate the DRA nic")
@@ -177,7 +192,7 @@ var _ = framework.SerialDescribe("[group:dra]", func() {
 		gomega.Eventually(func(g gomega.Gomega) {
 			pod, err := f.ClientSet.CoreV1().Pods(namespaceName).Get(ctx, podName, metav1.GetOptions{})
 			g.Expect(err).NotTo(gomega.HaveOccurred())
-			g.Expect(pod.Annotations).To(gomega.HaveKeyWithValue(allocatedKey, "true"))
+			g.Expect(pod.Annotations).To(gomega.HaveKeyWithValue(allocatedKey, allocatedValue))
 		}).WithTimeout(2 * time.Minute).WithPolling(2 * time.Second).Should(gomega.Succeed())
 
 		pod = podClient.GetPod(podName)

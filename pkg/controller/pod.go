@@ -503,6 +503,13 @@ func (c *Controller) getPodKubeovnNets(pod *v1.Pod) ([]*kubeovnNet, error) {
 			}
 		}
 	}
+	if err = checkDRAInterfaceNames(pod, draNets); err != nil {
+		klog.Error(err)
+		// A deleting pod still needs its networks to release them.
+		if pod.DeletionTimestamp.IsZero() {
+			return nil, err
+		}
+	}
 	attachmentNets = append(attachmentNets, draNets...)
 
 	podNets := attachmentNets
@@ -567,6 +574,9 @@ func (c *Controller) handleAddOrUpdatePod(key string) (err error) {
 		return err
 	}
 
+	// Checked before the nets are built: a claim allocated in between would count as ready
+	// although its nic is missing from podNets, and its port would be released as stale.
+	draClaimsPending := c.hasPendingDRAClaims(pod)
 	podNets, err := c.getPodKubeovnNets(pod)
 	if err != nil {
 		klog.Errorf("failed to get pod nets %v", err)
@@ -575,7 +585,7 @@ func (c *Controller) handleAddOrUpdatePod(key string) (err error) {
 	}
 
 	// check and do hotnoplug nic
-	updatedPod, hotplugDetails, err := c.syncKubeOvnNet(pod, podNets)
+	updatedPod, hotplugDetails, err := c.syncKubeOvnNet(pod, podNets, draClaimsPending)
 	if err != nil {
 		klog.Errorf("failed to sync pod nets %v", err)
 		c.recorder.Eventf(pod, v1.EventTypeWarning, "PodNetworkUpdateFailed", "stage=syncKubeOvnNet error=%v", err)
@@ -1805,7 +1815,9 @@ func collectStalePodNetworkState(pod *v1.Pod, podName string, targetPorts *strse
 	return state
 }
 
-func (c *Controller) syncKubeOvnNet(pod *v1.Pod, podNets []*kubeovnNet) (*v1.Pod, string, error) {
+// syncKubeOvnNet releases the ports of networks the pod no longer has. draClaimsPending is whether
+// the pod had unallocated resource claims when podNets was built.
+func (c *Controller) syncKubeOvnNet(pod *v1.Pod, podNets []*kubeovnNet, draClaimsPending bool) (*v1.Pod, string, error) {
 	podName := c.getNameByPod(pod)
 	key := cache.NewObjectName(pod.Namespace, podName).String()
 	targetPortNameList := strset.NewWithSize(len(podNets))
@@ -1839,7 +1851,7 @@ func (c *Controller) syncKubeOvnNet(pod *v1.Pod, podNets []*kubeovnNet) (*v1.Pod
 	}
 
 	staleState := collectStalePodNetworkState(pod, podName, targetPortNameList, ports)
-	if len(staleState.ports) != 0 && c.hasPendingDRAClaims(pod) {
+	if len(staleState.ports) != 0 && draClaimsPending {
 		// The pod's DRA nics are unknown until the scheduler allocates its claims. A recreated
 		// keep-vm-ip VM pod already has their ports, so cleaning up now would release the VM's
 		// addresses. The claim update requeues the pod once the claims are allocated.

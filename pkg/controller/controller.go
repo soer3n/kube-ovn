@@ -522,7 +522,7 @@ func Run(ctx context.Context, config *Configuration) {
 	var resourceClaimInformer, resourceSliceInformer cache.SharedIndexInformer
 	if config.EnableDRANic {
 		resourceClaimInformer = informerFactory.Resource().V1().ResourceClaims().Informer()
-		if err = resourceClaimInformer.AddIndexers(cache.Indexers{draClaimPodIndex: draClaimPodIndexFunc}); err != nil {
+		if err = resourceClaimInformer.AddIndexers(cache.Indexers{draClaimPodIndex: draClaimPodIndexFunc, draClaimPoolIndex: draClaimPoolIndexFunc}); err != nil {
 			util.LogFatalAndExit(err, "failed to add resource claim indexer")
 		}
 		resourceSliceInformer = informerFactory.Resource().V1().ResourceSlices().Informer()
@@ -935,6 +935,15 @@ func Run(ctx context.Context, config *Configuration) {
 			UpdateFunc: controller.enqueueUpdateResourceClaim,
 		}); err != nil {
 			util.LogFatalAndExit(err, "failed to add resource claim event handler")
+		}
+	}
+	if resourceSliceInformer != nil {
+		if _, err = resourceSliceInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+			AddFunc:    controller.enqueueAddResourceSlice,
+			UpdateFunc: controller.enqueueUpdateResourceSlice,
+			DeleteFunc: controller.enqueueDeleteResourceSlice,
+		}); err != nil {
+			util.LogFatalAndExit(err, "failed to add resource slice event handler")
 		}
 	}
 

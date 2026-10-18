@@ -16,7 +16,11 @@ const (
 	DeprecatedFinalizerName    = "kube-ovn-controller"
 	KubeOVNControllerFinalizer = "kubeovn.io/kube-ovn-controller"
 
-	AllocatedAnnotation          = "ovn.kubernetes.io/allocated"
+	AllocatedAnnotation = "ovn.kubernetes.io/allocated"
+	// DRAProvidersAnnotation records on a ResourceClaim the subnet and provider each DRA nic of
+	// the claim was allocated with, as JSON keyed by the allocated device:
+	// {"<pool>/<device>": {"subnet": ..., "provider": ...}}.
+	DRAProvidersAnnotation       = "ovn.kubernetes.io/dra_providers"
 	ServiceCIDRHashAnnotation    = "ovn.kubernetes.io/service-cidr-hash"
 	RoutedAnnotation             = "ovn.kubernetes.io/routed"
 	RoutesAnnotation             = "ovn.kubernetes.io/routes"

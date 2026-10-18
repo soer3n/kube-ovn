@@ -7887,6 +7887,12 @@ rules:
       - list
       - watch
   - apiGroups:
+      - "resource.k8s.io"
+    resources:
+      - resourceclaims
+    verbs:
+      - patch
+  - apiGroups:
       - "policy.networking.k8s.io"
     resources:
       - adminnetworkpolicies
