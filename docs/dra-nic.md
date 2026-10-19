@@ -52,4 +52,4 @@ A claim stands for one NIC with one address, so it can only be shared by the vir
 
 ## Testing
 
-`make kube-ovn-dra-e2e` runs against a cluster installed with `ENABLE_DRA_NIC=true` and skips otherwise. It covers only the kube-ovn-controller side: it publishes a static ResourceSlice, so no driver is needed, and the pod never starts, so no nic is plugged.
+`make kube-ovn-dra-e2e` runs against a cluster installed with `ENABLE_DRA_NIC=true` and skips otherwise; the CI job `kube-ovn-dra-e2e` runs it that way. It covers only the kube-ovn-controller side: it publishes a static ResourceSlice, so no driver is needed, and the pod never starts, so no nic is plugged.
